@@ -1,0 +1,31 @@
+name: Infrastructure
+on:
+  push:
+    paths: ['docker-compose.yml', 'docker/**', '.github/workflows/infrastructure.yml']
+  pull_request:
+    paths: ['docker-compose.yml', 'docker/**', '.github/workflows/infrastructure.yml']
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      POSTGRES_PASSWORD: ci-database-password
+      GEOSERVER_ADMIN_PASSWORD: ci-geoserver-password
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate and start services
+        run: |
+          docker compose config --quiet
+          docker compose up -d --wait --wait-timeout 480
+      - name: Verify schema and spatial constraints
+        run: docker compose exec -T postgis psql -U agrisuit -d agrisuit -v ON_ERROR_STOP=1 < docker/postgres/tests/schema.sql
+      - name: Verify GeoServer login
+        run: curl --fail --silent --user "admin:$GEOSERVER_ADMIN_PASSWORD" http://localhost:8080/geoserver/rest/about/version.json
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
