@@ -98,3 +98,93 @@ açılışta üzerine yazılmaması için Compose ortam ayarlarını da düzenle
 
 İmaj belgeleri: [PostGIS](https://github.com/postgis/docker-postgis),
 [GeoServer](https://github.com/geoserver/docker).
+
+## Manisa: rasterlar, tarıma kapalı alanlar ve sorgu API'si
+
+Python 3.12 ile `python -m pip install -r requirements-pipeline.txt` çalıştırın.
+Yalnızca API gerekiyorsa `requirements-api.txt` yeterli.
+
+### Raster üretimi
+
+Earth Engine'e erişimi etkin bir Google Cloud projesi ve yetkili bir hesap gerekir.
+Bir kez `earthengine authenticate` çalıştırıp aşağıdaki komutta kendi proje adınızı yazın:
+
+```powershell
+python -m src.rs_pipeline.export_rasters --project PROJE_KIMLIGI --boundary data/sample/manisa_boundary.geojson --end-year 2025 --years 3
+```
+
+Komut Google Drive `AgriSuit-GIS` klasörüne GeoTIFF işlerini gönderir ve iş
+kimliklerini yazdırır. Sonuçları Earth Engine Tasks ekranından takip edin.
+`--years` 3–5 yıl seçer; `--season-only` aylık dosyaları atlar. Tüm katmanlar
+aynı AOI'ye kırpılır, 30 m EPSG:32635 gridine oturur, NoData değeri `-9999` olur.
+Başka çalışma alanları için `--crs` ile metre birimli bir projeksiyon seçin.
+
+| Çıktı | Bantlar / yöntem |
+| --- | --- |
+| `terrain` | SRTM DEM'den yükseklik (m), eğim (°), bakı (°) |
+| `era5_land_YIL` | Yıllık ortalama 2 m sıcaklık (°C), günlük minimumun 0 °C altına düştüğü gün sayısı, toplam yağış (mm); tam takvim yılı |
+| `landsat_YIL_apr_sep` ve `landsat_YIL_AY` | Landsat 8/9 Nisan–Eylül veya aylık medyan: kırmızı, NIR, SWIR1, NDVI, NDMI, LST (°C), bant bazında geçerli gözlem sayıları |
+
+ERA5-Land sıcaklık ve yağışta bilinear, don günü sayısında en yakın komşu
+örneklemesi kullanılır. Yaklaşık 11 km iklim verisini 30 m gride yazmak yeni
+mekânsal ayrıntı üretmez. Landsat bulut, gölge, kar ve doygun pikselleri eler;
+gözlem olmayan yerler ve termal veri boşlukları NoData kalır.
+Kaynaklar: [SRTM](https://developers.google.com/earth-engine/datasets/catalog/USGS_SRTMGL1_003),
+[ERA5-Land](https://developers.google.com/earth-engine/datasets/catalog/ECMWF_ERA5_LAND_DAILY_AGGR),
+[Landsat 8](https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LC08_C02_T1_L2),
+[Landsat 9](https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LC09_C02_T1_L2).
+
+### Vektör içe aktarma ve maske
+
+Yeni bir Compose volume'unda şema ilk başlatmada kurulur. Var olan volume'u
+silmeden yükseltmek için, aşağıdaki kullanıcı/veritabanı adlarını gerekirse değiştirin:
+
+```powershell
+Get-Content docker/postgres/init/30-agriculture.sql -Raw | docker compose exec -T postgis psql -U agrisuit -d agrisuit -v ON_ERROR_STOP=1
+```
+
+Çalışma alanını kapsayan [CORINE](https://land.copernicus.eu/en/products/corine-land-cover)
+ve [OpenStreetMap](https://www.openstreetmap.org/copyright) poligon dosyalarını
+`data/raw` altına koyun. GeoPackage/GeoJSON gibi CRS bilgili vektör dosyaları
+kullanılabilir. `--corine-layer`, `--osm-layer` ve `--corine-code` ile katman/sütun
+seçilebilir. CORINE varsayılan kod sütunu `Code_18`; OSM'de `landuse`, `natural`,
+`wetland`, `boundary`, `leisure` etiketleri varsa ayrı sütunlar olarak dışa aktarılmalıdır.
+
+```powershell
+$env:DATABASE_URL = 'postgresql://agrisuit:PAROLA@127.0.0.1:5432/agrisuit'
+python -m src.rs_pipeline.import_constraints --boundary data/sample/manisa_boundary.geojson --region-code TR-45 --region-name Manisa --region-type province --corine data/raw/corine.gpkg --osm data/raw/osm.geojson
+python -m uvicorn src.backend.main:app
+```
+
+Bağlantı adresindeki `PAROLA` ve portu `.env` ayarlarınıza göre değiştirin;
+paroladaki URL özel karakterlerini yüzde kodlayın. İçe aktarma bölge sınırını
+ve o bölge için önceki CORINE/OSM kayıtlarını tek işlemde değiştirir. Yerleşim
+ve diğer yapay yüzeyler, ormanlar, sulak alanlar, su ve koruma alanları
+bölgeye kırpılır ve `land_constraints` tablosuna yazılır. `ST_Union` kapalı
+maskeyi, `ST_Difference` ise bölgenin kalan kısmını üretir. GeoServer'da
+`agriculture_masks` tablosunu yayınlarken `closed_geom` veya `open_geom`
+alanını katmanın geometrisi olarak seçin (gerekirse SQL View kullanın).
+
+Maske değişiklikte geçersizleşir; tarihli kısıtlar için günlük yenileme gerekir:
+`SELECT public.refresh_agriculture_mask('TR-45');`. Eksik veya eski maske
+API'de 503 döner. Kaynakların çalışma alanını kapsadığını kontrol edin.
+Sonuç, bu girdilere göre tarıma açıklık ön değerlendirmesidir; ürün uygunluğu
+skoru veya resmî imar/koruma kararı değildir.
+
+### Nokta ve poligon sorguları
+
+FastAPI: [Swagger](http://127.0.0.1:8000/docs). Koordinat sırası **boylam, enlem**.
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8000/regions/TR-45/eligibility/point?lon=27.43&lat=38.61'
+$body = '{"type":"Polygon","coordinates":[[[27.43,38.61],[27.44,38.61],[27.44,38.62],[27.43,38.62],[27.43,38.61]]]}'
+Invoke-RestMethod 'http://127.0.0.1:8000/regions/TR-45/eligibility/polygon' -Method Post -ContentType application/json -Body $body
+```
+
+SQL karşılıkları: `agriculture_point_status(kod, boylam, enlem)` ve
+`agriculture_status(kod, EPSG_4326_geometri)`. Sorgu girdinin tamamının bölge
+içinde kalmasını ister; kapalı alana temas eden poligonu da kapalı sayar.
+Sorgu sırasında maske yeniden hesaplanmaz; bölünmüş maskede GiST indeksli
+`ST_Intersects` uygulanır. Gecikme geometri boyutuna ve veriye bağlıdır.
+GitHub Actions sentetik CORINE/OSM dosyalarıyla içe aktarma, maske, SQL ve
+API'yi gerçek PostGIS'te doğrular ve 100 nokta sorgusunun süresini raporlar.
