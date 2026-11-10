@@ -6,6 +6,8 @@ from datetime import date
 from pathlib import Path
 
 import ee
+from pyproj import CRS
+from pyproj.exceptions import CRSError
 
 LANDSAT_BANDS = ["red", "nir", "swir1", "ndvi", "ndmi", "lst_c"]
 CLIMATE_BANDS = ["temperature_2m", "temperature_2m_min", "total_precipitation_sum"]
@@ -40,7 +42,8 @@ def climate(roi, year):
     if available != expected:
         raise ValueError(f"ERA5-Land {year}: {available}/{expected} days; use complete years")
     projection = ee.Image(daily.first()).select("temperature_2m").projection()
-    complete = daily.select(CLIMATE_BANDS).count().reduce(ee.Reducer.min()).eq(expected)
+    complete = (daily.select(CLIMATE_BANDS).count().reduce(ee.Reducer.min())
+                .eq(expected).setDefaultProjection(projection))
     temperature = (daily.select("temperature_2m").mean().subtract(273.15)
                    .rename("annual_mean_temp_c").setDefaultProjection(projection).resample("bilinear"))
     frost = daily.map(lambda image: image.select("temperature_2m_min").lt(273.15)).sum()
@@ -68,7 +71,8 @@ def landsat_scene(image):
     # ST_B10 is fully masked in L2SR scenes. Keep their optical observations.
     lst = image.select("ST_B10").multiply(0.00341802).add(149).subtract(273.15).rename("lst_c")
     lst = lst.updateMask(image.select("ST_QA").lte(300)).updateMask(image.select("ST_CDIST").gte(100))
-    return optical.addBands([index("nir", "red", "ndvi"), index("nir", "swir1", "ndmi"), lst]).updateMask(clear)
+    return (optical.addBands([index("nir", "red", "ndvi"), index("nir", "swir1", "ndmi"), lst])
+            .updateMask(clear).toFloat().copyProperties(image, ["system:time_start"]))
 
 
 def season_collection(roi, year):
@@ -81,7 +85,7 @@ def composite(collection):
     # A masked fallback preserves band names even in windows without scenes.
     empty = ee.Image.constant([0] * len(LANDSAT_BANDS)).rename(LANDSAT_BANDS).toFloat()
     scenes = collection.merge(ee.ImageCollection([empty.updateMask(ee.Image.constant(0))]))
-    counts = scenes.select(["nir", "ndvi", "ndmi", "lst_c"]).count().unmask(0).rename(
+    counts = scenes.select(["nir", "ndvi", "ndmi", "lst_c"]).count().unmask(0, sameFootprint=False).rename(
         ["optical_observations", "ndvi_observations", "ndmi_observations", "lst_observations"]
     )
     return scenes.median().addBands(counts)
@@ -113,6 +117,14 @@ def main():
     args = parser.parse_args()
     if not 0 < args.resolution <= 1000 or not 2014 <= args.end_year - args.years + 1 <= args.end_year < date.today().year:
         parser.error("Use a positive metric resolution up to 1000 m and full Landsat 8 years since 2014")
+    try:
+        crs = CRS.from_user_input(args.crs)
+    except CRSError as exc:
+        parser.error(str(exc))
+    if not crs.is_projected or any(axis.unit_conversion_factor != 1 for axis in crs.axis_info):
+        parser.error("--crs must be a projected CRS with metre units")
+    authority = crs.to_authority()
+    args.crs = ":".join(authority) if authority else crs.to_wkt()
     ee.Initialize(project=args.project)
     roi = read_boundary(args.boundary)
     years = range(args.end_year - args.years + 1, args.end_year + 1)

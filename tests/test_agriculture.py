@@ -46,6 +46,16 @@ class AgricultureIntegration(TestCase):
             )
             load_region(args)
             load_region(args)
+            args.corine = write_geojson(root / "wrong_region.geojson", [
+                (square(30, 40, 31, 41), {"Code_18": "112"}),
+            ])
+            with self.assertRaisesRegex(ValueError, "No classified CORINE polygons"):
+                load_region(args)
+            args.corine = write_geojson(root / "wrong_code.geojson", [
+                (square(27.2, 38.2, 27.3, 38.3), {"Code_18": "000"}),
+            ])
+            with self.assertRaisesRegex(ValueError, "Invalid CORINE class"):
+                load_region(args)
         with connect(os.environ["DATABASE_URL"]) as conn, conn.cursor() as cursor:
             cursor.execute("""
                 SELECT array_agg(c.constraint_type ORDER BY c.constraint_type),
@@ -63,7 +73,8 @@ class AgricultureIntegration(TestCase):
             self.assertEqual(cursor.fetchone(), (True, True, True))
             cursor.execute("""
                 EXPLAIN (ANALYZE, TIMING OFF)
-                SELECT public.agriculture_point_status(%s, 27.3, 38.4) FROM generate_series(1, 100)
+                SELECT public.agriculture_point_status(%s, 27 + i / 101.0, 38.4)
+                FROM generate_series(1, 100) AS i
             """, (args.region_code,))
             print("\n".join(row[0] for row in cursor.fetchall()))
 
@@ -76,6 +87,7 @@ class AgricultureIntegration(TestCase):
                 response = client.get(f"{url}/point", params={"lon": lon, "lat": lat})
                 self.assertEqual(response.json(), {"status": status, "is_open": status == "open"})
             for geom, status in [(square(27.2, 38.25, 27.5, 38.35), "closed"),
+                                 (square(27.3, 38.2, 27.4, 38.25), "closed"),
                                  (square(27.5, 38.5, 27.6, 38.6), "open"),
                                  (square(27.9, 38.9, 28.1, 39.1), "outside_region")]:
                 self.assertEqual(client.post(f"{url}/polygon", json=geom).json()["status"], status)

@@ -167,7 +167,10 @@ alanını katmanın geometrisi olarak seçin (gerekirse SQL View kullanın).
 
 Maske değişiklikte geçersizleşir; tarihli kısıtlar için günlük yenileme gerekir:
 `SELECT public.refresh_agriculture_mask('TR-45');`. Eksik veya eski maske
-API'de 503 döner. Kaynakların çalışma alanını kapsadığını kontrol edin.
+API'de 503 döner. İçe aktarıcı bölgeyle kesişmeyen CORINE girdisini veya bölge
+içindeki geçersiz CORINE sınıf kodlarını reddeder. Kaynakların tamamının çalışma
+alanını kapsadığını ayrıca kontrol edin; özellikle OSM kayıtlarının yokluğu
+koruma alanının bulunmadığını kanıtlamaz.
 Sonuç, bu girdilere göre tarıma açıklık ön değerlendirmesidir; ürün uygunluğu
 skoru veya resmî imar/koruma kararı değildir.
 
