@@ -1,9 +1,9 @@
 name: Infrastructure
 on:
   push:
-    paths: ['docker-compose.yml', 'docker/**', '.github/workflows/infrastructure.yml']
+    paths: ['docker-compose.yml', 'docker/**', 'src/backend/**', 'src/rs_pipeline/**', 'tests/**', 'requirements*.txt', '.github/workflows/infrastructure.yml']
   pull_request:
-    paths: ['docker-compose.yml', 'docker/**', '.github/workflows/infrastructure.yml']
+    paths: ['docker-compose.yml', 'docker/**', 'src/backend/**', 'src/rs_pipeline/**', 'tests/**', 'requirements*.txt', '.github/workflows/infrastructure.yml']
   workflow_dispatch:
 
 jobs:
@@ -13,14 +13,24 @@ jobs:
     env:
       POSTGRES_PASSWORD: ci-database-password
       GEOSERVER_ADMIN_PASSWORD: ci-geoserver-password
+      DATABASE_URL: postgresql://agrisuit:ci-database-password@127.0.0.1:5432/agrisuit
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pipeline dependencies
+        run: pip install -r requirements-pipeline.txt httpx
+      - name: Check raster pipeline entry point
+        run: python -m src.rs_pipeline.export_rasters --help
       - name: Validate and start services
         run: |
           docker compose config --quiet
           docker compose up -d --wait --wait-timeout 480
       - name: Verify schema and spatial constraints
         run: docker compose exec -T postgis psql -U agrisuit -d agrisuit -v ON_ERROR_STOP=1 < docker/postgres/tests/schema.sql
+      - name: Verify vector import, mask and API
+        run: python -m unittest discover -s tests -v
       - name: Verify GeoServer login
         run: curl --fail --silent --user "admin:$GEOSERVER_ADMIN_PASSWORD" http://localhost:8080/geoserver/rest/about/version.json
       - name: Show logs on failure
