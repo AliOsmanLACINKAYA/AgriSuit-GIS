@@ -3,3 +3,4 @@ earthengine-api>=0.1.390,<2
 geopandas>=0.14,<2
 pyogrio>=0.9,<1
 shapely>=2,<3
+pyproj>=3.6,<4

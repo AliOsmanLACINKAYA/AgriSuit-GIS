@@ -10,6 +10,13 @@ from psycopg2.extras import Json, execute_values
 from shapely import force_2d, make_valid, union_all
 from shapely.geometry import MultiPolygon
 
+CLC_CLASSES = frozenset("""
+111 112 121 122 123 124 131 132 133 141 142
+211 212 213 221 222 223 231 241 242 243 244
+311 312 313 321 322 323 324 331 332 333 334 335
+411 412 421 422 423 511 512 521 522 523
+""".split())
+
 
 def polygonal(geometry):
     if geometry is None or geometry.is_empty:
@@ -29,10 +36,7 @@ def polygonal(geometry):
     return MultiPolygon([merged]) if merged.geom_type == "Polygon" else merged
 
 
-def corine_category(value):
-    code = str(value).strip().removesuffix(".0")
-    if len(code) != 3 or not code.isdecimal():
-        return None
+def corine_category(code):
     if code.startswith("1"):
         return "settlement"
     if code in {"311", "312", "313"}:
@@ -75,20 +79,26 @@ def source_rows(frame, area, dataset, source_label, code_column):
     osm_columns = {"landuse", "natural", "wetland", "boundary", "leisure"}
     if dataset == "OSM" and not osm_columns.intersection(frame.columns):
         raise ValueError("OSM input must expose tags as attribute columns")
+    corine_hits = 0
     for _, item in frame.iterrows():
+        clipped = polygonal(polygonal(item[frame.geometry.name]).intersection(area))
+        if clipped.is_empty:
+            continue
         if dataset == "CORINE":
-            category = corine_category(item[code_column])
+            code = str(item[code_column]).strip().removesuffix(".0")
+            if code not in CLC_CLASSES:
+                raise ValueError(f"Invalid CORINE class {code!r} inside the study area")
+            corine_hits += 1
+            category = corine_category(code)
             categories = [category] if category else []
         else:
             categories = osm_categories(item)
-        if not categories:
-            continue
-        clipped = polygonal(polygonal(item[frame.geometry.name]).intersection(area))
-        if not clipped.is_empty:
-            name = item.get("name")
-            for category in categories:
-                yield (category, name if isinstance(name, str) and name.strip() else category,
-                       source_label, Binary(clipped.wkb), Json({"import_dataset": dataset}))
+        name = item.get("name")
+        for category in categories:
+            yield (category, name if isinstance(name, str) and name.strip() else category,
+                   source_label, Binary(clipped.wkb), Json({"import_dataset": dataset}))
+    if dataset == "CORINE" and not corine_hits:
+        raise ValueError("No classified CORINE polygons intersect the study area")
 
 
 def load_region(args):
